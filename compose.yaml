@@ -1,0 +1,242 @@
+# OpenBin Enterprise — the whole platform on one host.
+#
+# Rendered inputs: .env (install.sh), config/Caddyfile and
+# config/keycloak/import/realm-openapk.json (bin/openbin-enterprise render).
+# Everything the browser or the CLI touches goes through `proxy`; every
+# other port stays inside the compose network. The proxy also carries the
+# five public hostnames as network aliases so containers that must use the
+# public URL (none do today, but the CLI inside a jump box might) resolve
+# them without external DNS.
+
+name: openbin
+
+x-minio-client: &minio-client
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ENDPOINT_URL: http://minio:9000
+
+x-restart: &restart
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "50m", max-file: "5" }
+
+services:
+  proxy:
+    <<: *restart
+    image: caddy:2.9-alpine
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./config/tls:/etc/openbin/tls:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      default:
+        aliases:
+          - ${APP_HOST}
+          - ${APK_HOST}
+          - ${API_HOST}
+          - ${AUTH_HOST}
+          - ${S3_HOST}
+    depends_on:
+      - frontend
+      - core
+      - keycloak
+      - minio
+
+  postgres:
+    <<: *restart
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: openapk
+      POSTGRES_USER: openapk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./config/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openapk -d openapk"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    <<: *restart
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # Browsers fetch presigned URLs cross-origin from both web apps.
+      MINIO_API_CORS_ALLOW_ORIGIN: https://${APP_HOST},https://${APK_HOST}
+      MINIO_BROWSER: "off"
+    volumes:
+      - minio-data:/data
+
+  # One-shot: waits for MinIO, creates the two buckets, exits 0. `core`
+  # starts only after it completed, so first boot never races the buckets.
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    entrypoint: ["/bin/sh", "/init.sh"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./config/minio/init.sh:/init.sh:ro
+    depends_on:
+      - minio
+
+  keycloak:
+    <<: *restart
+    image: quay.io/keycloak/keycloak:26.6.2
+    command: ["start", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL_HOST: postgres
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      KC_HOSTNAME: https://${AUTH_HOST}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+    volumes:
+      - ./config/keycloak/import:/opt/keycloak/data/import:ro
+      - ./config/keycloak/themes:/opt/keycloak/themes:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  core:
+    <<: *restart
+    image: ${IMAGE_PREFIX}/core:${OPENBIN_VERSION}
+    mem_limit: ${CORE_MEM:-3g}
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/openapk
+      SPRING_DATASOURCE_USERNAME: openapk
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      # Tokens name the public issuer; keys are fetched over the internal
+      # hop so the core never has to trust the proxy's certificate.
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: https://${AUTH_HOST}/realms/openapk
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/openapk/protocol/openid-connect/certs
+      OPENAPK_KEK_B64: ${OPENAPK_KEK_B64}
+      OPENAPK_CORS_EXTRA_ORIGINS: https://${APP_HOST},https://${APK_HOST}
+      # Object storage: internal endpoint for the core, public one for the
+      # presigned URLs browsers and the CLI use.
+      OPENAPK_STORAGE_BACKEND: s3
+      OPENAPK_S3_BUCKET: openbin-media
+      OPENAPK_S3_REGION: us-east-1
+      OPENAPK_S3_ENDPOINT: http://minio:9000
+      OPENAPK_S3_PUBLIC_ENDPOINT: https://${S3_HOST}
+      OPENAPK_ANALYSIS_S3_BUCKET: openbin-analysis
+      OPENAPK_ANALYSIS_S3_REGION: us-east-1
+      OPENAPK_ANALYSIS_S3_ENDPOINT: http://minio:9000
+      OPENAPK_ANALYSIS_S3_PUBLIC_ENDPOINT: https://${S3_HOST}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      # Decompilers run in-cluster here (they are paused on the hosted
+      # product for cost reasons, not technical ones).
+      OPENAPK_GHIDRA_WORKER_URL: http://ghidra-worker:8000
+      OPENAPK_GHIDRA_DISABLED: "false"
+      OPENAPK_JADX_WORKER_URL: http://jadx-worker:8000
+      OPENAPK_JADX_WORKER_TOKEN: ${JADX_WORKER_TOKEN}
+      OPENAPK_JADX_DISABLED: "false"
+      OPENAPK_WORKERS_DAILY_CAP: "0"
+      # Script analyzers: same Lambda images, reached over HTTP.
+      OPENAPK_SCRIPT_ANALYZER_ENABLED: "true"
+      OPENAPK_SCRIPT_ANALYZER_MODE: http
+      OPENAPK_SCRIPT_ANALYZER_FUNCTION: http://script-worker:8080
+      OPENAPK_PYPI_ANALYZER_FUNCTION: http://pypi-worker:8080
+      OPENAPK_SHELL_ANALYZER_FUNCTION: http://shell-worker:8080
+      OPENAPK_SCRIPT_ANALYZER_REGION: us-east-1
+      # Where this deployment lives.
+      OPENAPK_SELF_HOSTED: "true"
+      OPENAPK_OPENBIN_WEB_URL: https://${APP_HOST}
+      OPENAPK_OPENAPK_WEB_URL: https://${APK_HOST}
+      OPENAPK_PUBLIC_AUTH_URL: https://${AUTH_HOST}
+      OPENAPK_DOWNLOADS_BASE: https://${APP_HOST}/downloads
+      OPENAPK_TOS_REQUIRED: ${TOS_REQUIRED:-false}
+      OPENAPK_LLM_EGRESS_ALLOWLIST: ${LLM_EGRESS_ALLOWLIST:-}
+      OPENAPK_ADMIN_EMAILS: ${ADMIN_EMAIL}
+      # Account deletion removes the Keycloak identity too.
+      OPENAPK_KEYCLOAK_ADMIN_ENABLED: "true"
+      OPENAPK_KEYCLOAK_URL: http://keycloak:8080
+      OPENAPK_KEYCLOAK_REALM: openapk
+      OPENAPK_KEYCLOAK_ADMIN_CLIENT_ID: openbin-core
+      OPENAPK_KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_CORE_CLIENT_SECRET}
+    volumes:
+      - core-workspace:/var/openapk/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_started
+
+  ghidra-worker:
+    <<: *restart
+    image: ${IMAGE_PREFIX}/ghidra-worker:${OPENBIN_VERSION}
+    mem_limit: ${GHIDRA_MEM:-8g}
+    environment:
+      LOG_LEVEL: INFO
+
+  jadx-worker:
+    <<: *restart
+    image: ${IMAGE_PREFIX}/jadx-worker:${OPENBIN_VERSION}
+    mem_limit: ${JADX_MEM:-6g}
+    environment:
+      LOG_LEVEL: INFO
+      WORKER_TOKEN: ${JADX_WORKER_TOKEN}
+
+  script-worker:
+    <<: *restart
+    image: ${IMAGE_PREFIX}/script-worker:${OPENBIN_VERSION}
+    environment: *minio-client
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+  pypi-worker:
+    <<: *restart
+    image: ${IMAGE_PREFIX}/pypi-worker:${OPENBIN_VERSION}
+    environment: *minio-client
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+  shell-worker:
+    <<: *restart
+    image: ${IMAGE_PREFIX}/shell-worker:${OPENBIN_VERSION}
+    environment: *minio-client
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+  frontend:
+    <<: *restart
+    image: ${IMAGE_PREFIX}/frontend:${OPENBIN_VERSION}
+    environment:
+      APP_HOST: ${APP_HOST}
+      APK_HOST: ${APK_HOST}
+      API_HOST: ${API_HOST}
+      AUTH_HOST: ${AUTH_HOST}
+    volumes:
+      - ./downloads:/usr/share/openbin/downloads:ro
+
+volumes:
+  caddy-data:
+  caddy-config:
+  postgres-data:
+  minio-data:
+  core-workspace:

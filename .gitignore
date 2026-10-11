@@ -1,0 +1,14 @@
+# Per-install state. Never commit a customer's secrets.
+.env
+config/Caddyfile
+config/keycloak/import/*.json
+config/tls/*
+!config/tls/.gitkeep
+
+# Fetched release assets and built bundles.
+downloads/*
+!downloads/.gitkeep
+dist/
+*.tar
+*.tar.gz
+*.tar.zst

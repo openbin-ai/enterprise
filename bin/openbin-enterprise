@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+#
+# Day-two operations for an OpenBin Enterprise install.
+#
+#   openbin-enterprise up|down|restart|status|logs [service]
+#   openbin-enterprise render            re-render proxy + realm config from .env
+#   openbin-enterprise pull              pull images for OPENBIN_VERSION in .env
+#   openbin-enterprise load FILE         load an image bundle (air-gapped)
+#   openbin-enterprise upgrade [--version V] [--images FILE]
+#   openbin-enterprise backup [DIR]      databases + object store → DIR (default backups/<timestamp>)
+#   openbin-enterprise restore DIR       restore a backup made by `backup` (stack must be down)
+#   openbin-enterprise ca-cert           print the internal root CA (TLS_MODE=internal)
+#   openbin-enterprise config            print the non-secret configuration
+#   openbin-enterprise psql              open a psql shell on the platform database
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib.sh
+. "$ROOT/bin/lib.sh"
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  help|-h|--help) sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+require_docker
+load_env
+
+case "$cmd" in
+  up)       render_all; compose up -d --remove-orphans; wait_for_core 600 ;;
+  down)     compose down ;;
+  restart)  compose restart "$@" ;;
+  status)
+    compose ps
+    echo
+    cid="$(compose ps -q core 2>/dev/null || true)"
+    if [ -n "$cid" ]; then
+      echo "backend health: $(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid")"
+    fi
+    echo "web: https://${APP_HOST}  https://${APK_HOST}   auth: https://${AUTH_HOST}   api: https://${API_HOST}" ;;
+  logs)     compose logs -f --tail 200 "$@" ;;
+  render)   render_all; ok "rendered; run 'openbin-enterprise up' to apply" ;;
+  pull)     compose pull ;;
+  load)     [ -n "${1:-}" ] || die "usage: openbin-enterprise load FILE"; load_images "$1" ;;
+  upgrade)
+    new_version=""; images=""
+    while [ $# -gt 0 ]; do case "$1" in
+      --version) new_version="$2"; shift 2 ;;
+      --images)  images="$2"; shift 2 ;;
+      *) die "unknown option $1" ;; esac; done
+    if [ -n "$images" ]; then
+      load_images "$images"
+      # The bundle carries its version; adopt it unless told otherwise.
+      if [ -z "$new_version" ] && [ -f "$ROOT/VERSION" ]; then new_version="$(cat "$ROOT/VERSION")"; fi
+    fi
+    if [ -n "$new_version" ]; then
+      sed -i "s/^OPENBIN_VERSION=.*/OPENBIN_VERSION=${new_version}/" "$ROOT/.env"
+      load_env
+      info "OPENBIN_VERSION set to ${new_version}"
+    fi
+    [ -z "$images" ] && compose pull
+    info "taking a backup before upgrading"
+    "$0" backup
+    render_all
+    compose up -d --remove-orphans
+    wait_for_core 900
+    ok "upgraded to ${OPENBIN_VERSION}" ;;
+  backup)
+    dest="${1:-$ROOT/backups/$(date -u +%Y%m%dT%H%M%SZ)}"
+    mkdir -p "$dest"
+    info "dumping databases"
+    compose exec -T postgres pg_dump -U openapk -Fc openapk > "$dest/openapk.dump"
+    compose exec -T postgres pg_dump -U openapk -Fc keycloak > "$dest/keycloak.dump"
+    info "mirroring object storage"
+    docker run --rm --network openbin_default \
+      -e MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000" \
+      -v "$dest:/backup" minio/mc:RELEASE.2025-04-16T18-13-26Z \
+      sh -c 'mc mirror --overwrite --quiet local/openbin-media /backup/openbin-media && mc mirror --overwrite --quiet local/openbin-analysis /backup/openbin-analysis'
+    cp "$ROOT/.env" "$dest/env.backup"; chmod 600 "$dest/env.backup"
+    echo "$OPENBIN_VERSION" > "$dest/VERSION"
+    ok "backup written to $dest (keep env.backup safe: it holds the encryption key for stored API keys)" ;;
+  restore)
+    src="${1:-}"; [ -d "$src" ] || die "usage: openbin-enterprise restore DIR"
+    [ -f "$src/openapk.dump" ] || die "$src does not look like a backup directory"
+    warn "this replaces the current databases and object store with $src"
+    read -r -p "Type RESTORE to continue: " c; [ "$c" = RESTORE ] || die "aborted"
+    compose up -d postgres minio
+    sleep 5
+    for db in openapk keycloak; do
+      compose exec -T postgres psql -U openapk -d postgres -c "DROP DATABASE IF EXISTS ${db}_restore;" >/dev/null
+      compose exec -T postgres psql -U openapk -d postgres -c "CREATE DATABASE ${db}_restore OWNER $( [ $db = keycloak ] && echo keycloak || echo openapk );" >/dev/null
+      compose exec -T postgres pg_restore -U openapk -d "${db}_restore" < "$src/$db.dump"
+      compose exec -T postgres psql -U openapk -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${db}';" >/dev/null
+      compose exec -T postgres psql -U openapk -d postgres -c "DROP DATABASE IF EXISTS ${db}; ALTER DATABASE ${db}_restore RENAME TO ${db};" >/dev/null
+    done
+    docker run --rm --network openbin_default \
+      -e MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000" \
+      -v "$(cd "$src" && pwd):/backup:ro" minio/mc:RELEASE.2025-04-16T18-13-26Z \
+      sh -c 'mc mb --ignore-existing local/openbin-media local/openbin-analysis && mc mirror --overwrite --remove --quiet /backup/openbin-media local/openbin-media && mc mirror --overwrite --remove --quiet /backup/openbin-analysis local/openbin-analysis'
+    ok "restored; start the stack with 'openbin-enterprise up'" ;;
+  ca-cert)
+    [ "${TLS_MODE:-internal}" = internal ] || die "TLS_MODE is ${TLS_MODE}; there is no internal CA to export"
+    compose exec -T proxy cat /data/caddy/pki/authorities/local/root.crt ;;
+  config)
+    grep -vE '^(#|$|.*(PASSWORD|SECRET|TOKEN|KEK)=)' "$ROOT/.env" ;;
+  psql)     compose exec postgres psql -U openapk -d openapk ;;
+  *) die "unknown command '$cmd' (try --help)" ;;
+esac
