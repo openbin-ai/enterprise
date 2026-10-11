@@ -67,9 +67,11 @@ services:
       timeout: 3s
       retries: 20
 
+  # Our own build of the official MinIO binaries (images/minio): MinIO no
+  # longer publishes community images to public registries.
   minio:
     <<: *restart
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: ${IMAGE_PREFIX}/minio:${OPENBIN_VERSION}
     command: ["server", "/data"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -79,11 +81,18 @@ services:
       MINIO_BROWSER: "off"
     volumes:
       - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   # One-shot: waits for MinIO, creates the two buckets, exits 0. `core`
   # starts only after it completed, so first boot never races the buckets.
   minio-init:
-    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    image: ${IMAGE_PREFIX}/minio:${OPENBIN_VERSION}
+    user: root
     entrypoint: ["/bin/sh", "/init.sh"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -91,7 +100,8 @@ services:
     volumes:
       - ./config/minio/init.sh:/init.sh:ro
     depends_on:
-      - minio
+      minio:
+        condition: service_healthy
 
   keycloak:
     <<: *restart

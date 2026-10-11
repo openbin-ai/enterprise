@@ -15,7 +15,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --version) VERSION="$2"; shift 2 ;; --prefix) PREFIX="$2"; shift 2 ;;
   *) die "unknown option $1" ;; esac; done
 
-ours=(core frontend ghidra-worker jadx-worker script-worker pypi-worker shell-worker)
+ours=(minio core frontend ghidra-worker jadx-worker script-worker pypi-worker shell-worker)
 third=( $(grep -hoE '^\s+image: [^$ ]+' "$HERE/compose.yaml" | awk '{print $2}' | sort -u) )
 images=()
 for n in "${ours[@]}"; do images+=("$PREFIX/$n:$VERSION"); done

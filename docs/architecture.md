@@ -37,6 +37,10 @@ proxy listens on the host.
 | BYOK egress | public destinations only | plus `LLM_EGRESS_ALLOWLIST` |
 | CLI target | compiled-in | `openbin login --server` |
 
+## Images
+
+All images except Postgres, Keycloak and Caddy are built by `scripts/build-images.sh` and published under `ghcr.io/openbin-ai/enterprise`. That includes MinIO, compiled from the upstream source tag (`images/minio`): MinIO stopped publishing community images and binaries in 2025.
+
 ## Data
 
 - Postgres `openapk`: users, projects, reports, highlights, chats, encrypted API keys.

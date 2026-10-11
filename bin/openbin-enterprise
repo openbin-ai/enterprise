@@ -72,8 +72,8 @@ case "$cmd" in
     info "mirroring object storage"
     docker run --rm --network openbin_default \
       -e MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000" \
-      -v "$dest:/backup" minio/mc:RELEASE.2025-04-16T18-13-26Z \
-      sh -c 'mc mirror --overwrite --quiet local/openbin-media /backup/openbin-media && mc mirror --overwrite --quiet local/openbin-analysis /backup/openbin-analysis'
+      -v "$dest:/backup" --entrypoint sh "${IMAGE_PREFIX}/minio:${OPENBIN_VERSION}" \
+      -c 'mc mirror --overwrite --quiet local/openbin-media /backup/openbin-media && mc mirror --overwrite --quiet local/openbin-analysis /backup/openbin-analysis'
     cp "$ROOT/.env" "$dest/env.backup"; chmod 600 "$dest/env.backup"
     echo "$OPENBIN_VERSION" > "$dest/VERSION"
     ok "backup written to $dest (keep env.backup safe: it holds the encryption key for stored API keys)" ;;
@@ -93,8 +93,8 @@ case "$cmd" in
     done
     docker run --rm --network openbin_default \
       -e MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000" \
-      -v "$(cd "$src" && pwd):/backup:ro" minio/mc:RELEASE.2025-04-16T18-13-26Z \
-      sh -c 'mc mb --ignore-existing local/openbin-media local/openbin-analysis && mc mirror --overwrite --remove --quiet /backup/openbin-media local/openbin-media && mc mirror --overwrite --remove --quiet /backup/openbin-analysis local/openbin-analysis'
+      -v "$(cd "$src" && pwd):/backup:ro" --entrypoint sh "${IMAGE_PREFIX}/minio:${OPENBIN_VERSION}" \
+      -c 'mc mb --ignore-existing local/openbin-media local/openbin-analysis && mc mirror --overwrite --remove --quiet /backup/openbin-media local/openbin-media && mc mirror --overwrite --remove --quiet /backup/openbin-analysis local/openbin-analysis'
     ok "restored; start the stack with 'openbin-enterprise up'" ;;
   ca-cert)
     [ "${TLS_MODE:-internal}" = internal ] || die "TLS_MODE is ${TLS_MODE}; there is no internal CA to export"

@@ -47,6 +47,7 @@ build() { # name dir [extra docker build args...]
   return 0
 }
 
+want minio         && build minio         "$HERE/images/minio"
 want core          && build core          "$CTX/core"
 want frontend      && build frontend      "$CTX" -f "$CTX/images/frontend/Dockerfile"
 want ghidra-worker && build ghidra-worker "$CTX/ghidra-worker"
