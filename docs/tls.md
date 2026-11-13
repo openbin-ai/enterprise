@@ -1,7 +1,36 @@
 # TLS
 
-Three modes, chosen at install time (`TLS_MODE` in `.env`). Change it
-later with `bin/openbin-enterprise render && bin/openbin-enterprise up`.
+The mode is chosen at install time (`TLS_MODE` in `.env`). Installs
+reached by IP address use `selfsigned` (or `custom`); installs with DNS
+names use `internal`, `acme` or `custom`.
+
+## selfsigned (IP layout default)
+
+Browsers only allow sign-in over HTTPS, and no public authority issues
+certificates for private IP addresses, so the installer creates its own
+CA and a certificate for the host's address in `config/tls/`.
+
+Without further steps, each analyst sees a certificate warning the first
+time they open each of the two URLs, and clicks through it. To remove the
+warning, import the CA using the per-OS steps under "internal" below. It
+is served by the instance and printed by the CLI:
+
+```sh
+curl -kO https://<ip>/downloads/openbin-ca.crt
+bin/openbin-enterprise ca-cert > openbin-root-ca.crt     # same file, on the host
+```
+
+The `openbin` CLI and `curl` have no click-through, so analyst machines
+that use the CLI need the CA imported.
+
+The CA is created once and lasts ten years. The server certificate lasts
+825 days; running `./install.sh` (or `bin/openbin-enterprise up`) within
+30 days of expiry, or after an address change, re-issues it from the same
+CA, so an imported CA keeps working. `--san` adds further IPs or names to
+the certificate. Keep `config/tls/` with your backups: `backup` copies it.
+
+To use a certificate from your own authority instead, pass
+`--cert fullchain.pem --key privkey.pem` to the installer.
 
 ## internal (default)
 

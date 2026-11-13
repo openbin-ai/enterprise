@@ -1,7 +1,7 @@
 # OpenBin Enterprise
 
 Self-hosted OpenBin and OpenAPK for private networks: one host, one
-`install.sh`, everything in Docker Compose. Built for environments that
+file to run, everything in Docker Compose. Built for environments that
 cannot use the hosted service, including air-gapped ones.
 
 This repository is private. The platform itself is open source under
@@ -14,7 +14,7 @@ commercial license that replaces the AGPL terms for their use.
 
 | Component | Role |
 |---|---|
-| `proxy` (Caddy) | TLS and routing for the five hostnames |
+| `proxy` (Caddy) | TLS and routing (two ports on one IP, or five hostnames) |
 | `frontend` | OpenBin and OpenAPK web apps, plus `/downloads/` for the CLI and BINNY |
 | `core` | Spring Boot backend |
 | `postgres` | platform and Keycloak databases |
@@ -23,29 +23,44 @@ commercial license that replaces the AGPL terms for their use.
 | `ghidra-worker`, `jadx-worker` | in-cluster decompilers (web uploads work without the CLI) |
 | `script-worker`, `pypi-worker`, `shell-worker` | npm, PyPI and shell analyzers |
 
-Hostnames, all on one base domain: `app.`, `apk.`, `api.`, `auth.`, `s3.`.
-
 ## Install
 
-Requirements: Linux host, Docker Engine 24+ with Compose v2, 8 vCPU,
-16 GiB RAM, 100 GiB disk, DNS for the five hostnames. Details in
-[docs/sizing.md](docs/sizing.md).
+Requirements: a Linux host with Docker Engine 24+ and Compose v2, 8 vCPU,
+16 GiB RAM, 100 GiB disk. Nothing else: no DNS, no internet, no packages.
+Details in [docs/sizing.md](docs/sizing.md).
 
 ```sh
-tar xzf openbin-enterprise-<version>.tar.gz && cd openbin-enterprise-<version>
+sudo ./openbin-enterprise-<version>.run
+```
+
+The file carries the installer, every image and the CLI downloads. It
+prints two URLs when it is done:
+
+```
+OpenBin   https://10.0.4.17/
+OpenAPK   https://10.0.4.17:8443/
+```
+
+Those two ports are the only ones exposed, and both can be moved
+(`--openbin-port`, `--openapk-port`) for networks that block ranges.
+`--ip` overrides the detected address.
+
+People create their own accounts from the sign-in page by default, or
+sign in with your LDAP / Active Directory after one command
+(`bin/openbin-enterprise ldap connect`, see [docs/sso.md](docs/sso.md)).
+Files are dropped onto the web page and decompiled on the server; the CLI
+is optional.
+
+With DNS names instead (`app.`, `apk.`, `api.`, `auth.`, `s3.` under one
+base domain):
+
+```sh
 ./install.sh --domain re.corp.example --admin-email you@corp.example --registry-token <token>
-```
-
-Air-gapped, with the offline bundle:
-
-```sh
 ./install.sh --domain re.corp.example --admin-email you@corp.example \
-             --images openbin-enterprise-images-<version>.tar.gz
+             --images openbin-enterprise-images-<version>.tar.gz       # air-gapped
 ```
 
-The installer writes `.env`, renders the proxy and realm configuration,
-loads or pulls images, starts the stack and prints the URLs. Full
-walkthrough in [docs/install.md](docs/install.md).
+Full walkthrough in [docs/install.md](docs/install.md).
 
 ## Operate
 
@@ -68,6 +83,7 @@ scripts/fetch-downloads.sh --platform-dir ../OpenAPK       # CLI, worker tarball
 scripts/save-images.sh                                     # one tar.gz with every image
 scripts/package.sh            # online bundle
 scripts/package.sh --offline  # bundle with images + downloads
+scripts/package.sh --run      # the offline bundle as one self-extracting installer
 ```
 
 Bump `VERSION` first. The platform changes that make this distribution

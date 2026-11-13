@@ -5,7 +5,7 @@
 # stages a clean copy and passes this file with -f.
 #
 # Endpoints are NOT baked in: the container writes /openbin-config.js from
-# APP_HOST / APK_HOST / API_HOST / AUTH_HOST at start (entrypoint.sh), and
+# APP_URL / API_URL / AUTH_URL at start (entrypoint.sh), and
 # the apps read window.__OPENBIN_CONFIG__ before falling back to Vite env.
 
 FROM node:22-alpine AS build

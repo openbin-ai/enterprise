@@ -1,0 +1,18 @@
+# Domain layout: five hostnames under one base domain, on :80/:443.
+# Added to compose.yaml when INSTALL_MODE=domain (see bin/lib.sh).
+services:
+  proxy:
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    # The public hostnames resolve to the proxy inside the compose network
+    # too, so a container that must use a public URL needs no external DNS.
+    networks:
+      default:
+        aliases:
+          - ${APP_HOST}
+          - ${APK_HOST}
+          - ${API_HOST}
+          - ${AUTH_HOST}
+          - ${S3_HOST}

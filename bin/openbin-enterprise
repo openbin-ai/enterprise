@@ -9,7 +9,10 @@
 #   openbin-enterprise upgrade [--version V] [--images FILE]
 #   openbin-enterprise backup [DIR]      databases + object store → DIR (default backups/<timestamp>)
 #   openbin-enterprise restore DIR       restore a backup made by `backup` (stack must be down)
-#   openbin-enterprise ca-cert           print the internal root CA (TLS_MODE=internal)
+#   openbin-enterprise ldap connect|sync|status|remove   sign in with LDAP / Active Directory (ldap connect --help)
+#   openbin-enterprise ca-cert           print this install's root CA (import it on analyst machines)
+#   openbin-enterprise urls              print the addresses users open
+#   openbin-enterprise compose ARGS...   raw `docker compose` against this stack
 #   openbin-enterprise config            print the non-secret configuration
 #   openbin-enterprise psql              open a psql shell on the platform database
 set -euo pipefail
@@ -19,13 +22,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cmd="${1:-help}"; shift || true
 case "$cmd" in
-  help|-h|--help) sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  help|-h|--help) sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 require_docker
 load_env
 
 case "$cmd" in
-  up)       render_all; compose up -d --remove-orphans; wait_for_core 600 ;;
+  up)       render_all; start_stack 600 ;;
+  compose)  compose "$@" ;;
+  urls)     print_summary ;;
   down)     compose down ;;
   restart)  compose restart "$@" ;;
   status)
@@ -35,7 +40,7 @@ case "$cmd" in
     if [ -n "$cid" ]; then
       echo "backend health: $(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid")"
     fi
-    echo "web: https://${APP_HOST}  https://${APK_HOST}   auth: https://${AUTH_HOST}   api: https://${API_HOST}" ;;
+    echo "OpenBin: ${APP_URL}/   OpenAPK: ${APK_URL}/   sign-in admin: ${AUTH_URL}/admin/   api: ${API_URL}" ;;
   logs)     compose logs -f --tail 200 "$@" ;;
   render)   render_all; ok "rendered; run 'openbin-enterprise up' to apply" ;;
   pull)     compose pull ;;
@@ -56,12 +61,11 @@ case "$cmd" in
       load_env
       info "OPENBIN_VERSION set to ${new_version}"
     fi
-    [ -z "$images" ] && compose pull
+    if [ -z "$images" ] && ! images_present; then compose pull; fi
     info "taking a backup before upgrading"
     "$0" backup
     render_all
-    compose up -d --remove-orphans
-    wait_for_core 900
+    start_stack 900
     ok "upgraded to ${OPENBIN_VERSION}" ;;
   backup)
     dest="${1:-$ROOT/backups/$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -70,11 +74,16 @@ case "$cmd" in
     compose exec -T postgres pg_dump -U openapk -Fc openapk > "$dest/openapk.dump"
     compose exec -T postgres pg_dump -U openapk -Fc keycloak > "$dest/keycloak.dump"
     info "mirroring object storage"
-    docker run --rm --network openbin_default \
+    docker run --rm --network "${COMPOSE_PROJECT_NAME:-openbin}_default" \
       -e MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000" \
       -v "$dest:/backup" --entrypoint sh "${IMAGE_PREFIX}/minio:${OPENBIN_VERSION}" \
       -c 'mc mirror --overwrite --quiet local/openbin-media /backup/openbin-media && mc mirror --overwrite --quiet local/openbin-analysis /backup/openbin-analysis'
     cp "$ROOT/.env" "$dest/env.backup"; chmod 600 "$dest/env.backup"
+    # This install's CA and certificate (IP layout) or your own (custom).
+    if ls "$ROOT"/config/tls/*.pem >/dev/null 2>&1; then
+      mkdir -p "$dest/tls"; cp -p "$ROOT"/config/tls/* "$ROOT"/config/tls/.sans "$dest/tls/" 2>/dev/null || true
+      chmod -R go-rwx "$dest/tls"
+    fi
     echo "$OPENBIN_VERSION" > "$dest/VERSION"
     ok "backup written to $dest (keep env.backup safe: it holds the encryption key for stored API keys)" ;;
   restore)
@@ -91,14 +100,66 @@ case "$cmd" in
       compose exec -T postgres psql -U openapk -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${db}';" >/dev/null
       compose exec -T postgres psql -U openapk -d postgres -c "DROP DATABASE IF EXISTS ${db}; ALTER DATABASE ${db}_restore RENAME TO ${db};" >/dev/null
     done
-    docker run --rm --network openbin_default \
+    docker run --rm --network "${COMPOSE_PROJECT_NAME:-openbin}_default" \
       -e MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000" \
       -v "$(cd "$src" && pwd):/backup:ro" --entrypoint sh "${IMAGE_PREFIX}/minio:${OPENBIN_VERSION}" \
       -c 'mc mb --ignore-existing local/openbin-media local/openbin-analysis && mc mirror --overwrite --remove --quiet /backup/openbin-media local/openbin-media && mc mirror --overwrite --remove --quiet /backup/openbin-analysis local/openbin-analysis'
     ok "restored; start the stack with 'openbin-enterprise up'" ;;
   ca-cert)
-    [ "${TLS_MODE:-internal}" = internal ] || die "TLS_MODE is ${TLS_MODE}; there is no internal CA to export"
-    compose exec -T proxy cat /data/caddy/pki/authorities/local/root.crt ;;
+    case "${TLS_MODE:-internal}" in
+      internal)   compose exec -T proxy cat /data/caddy/pki/authorities/local/root.crt ;;
+      selfsigned) cat "$ROOT/config/tls/ca.pem" ;;
+      *) die "TLS_MODE is ${TLS_MODE}; the certificate is not from this install's own CA" ;;
+    esac ;;
+  ldap)
+    sub="${1:-status}"; shift || true
+    case "$sub" in
+      connect)
+        url=""; bind_dn=""; pw_file=""; users_dn=""; vendor=other; attr=""; filter=""; ca=""
+        while [ $# -gt 0 ]; do case "$1" in
+          --url) url="$2"; shift 2 ;;
+          --bind-dn) bind_dn="$2"; shift 2 ;;
+          --bind-password-file) pw_file="$2"; shift 2 ;;
+          --users-dn) users_dn="$2"; shift 2 ;;
+          --vendor) vendor="$2"; shift 2 ;;
+          --username-attr) attr="$2"; shift 2 ;;
+          --filter) filter="$2"; shift 2 ;;
+          --ca-cert) ca="$2"; shift 2 ;;
+          -h|--help) cat <<'HELP'
+Sign in with LDAP or Active Directory (read-only; nothing is written to the directory).
+
+  openbin-enterprise ldap connect --url ldaps://dc1.corp.example:636 \
+      --bind-dn 'CN=svc-openbin,OU=Service,DC=corp,DC=example' \
+      --users-dn 'OU=Staff,DC=corp,DC=example' --vendor ad
+
+  --url URL               ldap://host:389 or ldaps://host:636
+  --bind-dn DN            read-only account used to look people up
+  --bind-password-file F  file with that account's password; without it you are
+                          asked (or LDAP_BIND_PASSWORD is used). Stored only in Keycloak.
+  --users-dn DN           where people live; the whole subtree is searched
+  --vendor ad|other       Active Directory, or anything else (default: other)
+  --username-attr A       default sAMAccountName for ad, uid otherwise
+  --filter F              optional, e.g. (memberOf=CN=RE-Team,OU=Groups,DC=corp,DC=example)
+  --ca-cert FILE          CA that signed the directory's ldaps:// certificate
+
+Running it again updates the existing connection.
+Also: ldap sync (re-read the directory now) | ldap status | ldap remove
+HELP
+            exit 0 ;;
+          *) die "unknown option $1 (try: ldap connect --help)" ;; esac; done
+        [ -n "$url" ] && [ -n "$bind_dn" ] && [ -n "$users_dn" ] || die "--url, --bind-dn and --users-dn are required (try: ldap connect --help)"
+        if [ -n "$pw_file" ]; then [ -f "$pw_file" ] || die "password file not found: $pw_file"; pw="$(head -n 1 "$pw_file" | tr -d '\r\n')"
+        elif [ -n "${LDAP_BIND_PASSWORD:-}" ]; then pw="$LDAP_BIND_PASSWORD"
+        elif [ -t 0 ]; then read -r -s -p "Password for $bind_dn: " pw; echo
+        else die "the bind password is missing: pass --bind-password-file FILE or set LDAP_BIND_PASSWORD"; fi
+        [ -n "$pw" ] || die "the bind password is empty"
+        [ -z "$ca" ] || ldap_trust_ca "$ca"
+        ldap_connect "$url" "$bind_dn" "$pw" "$users_dn" "$vendor" "$attr" "$filter" ;;
+      sync)   ldap_sync ;;
+      status) ldap_status ;;
+      remove) ldap_remove ;;
+      *) die "usage: openbin-enterprise ldap connect|sync|status|remove" ;;
+    esac ;;
   config)
     grep -vE '^(#|$|.*(PASSWORD|SECRET|TOKEN|KEK)=)' "$ROOT/.env" ;;
   psql)     compose exec postgres psql -U openapk -d openapk ;;

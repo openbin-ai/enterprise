@@ -1,0 +1,8 @@
+# IP layout: one address, no DNS, two ports. OpenBin and OpenAPK each get a
+# port; the API, sign-in and object storage are routed by path under them.
+# Added to compose.yaml when INSTALL_MODE=ip (see bin/lib.sh).
+services:
+  proxy:
+    ports:
+      - "${OPENBIN_PORT:-443}:${OPENBIN_PORT:-443}"
+      - "${OPENAPK_PORT:-8443}:${OPENAPK_PORT:-8443}"
