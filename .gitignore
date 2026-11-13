@@ -3,6 +3,10 @@
 config/Caddyfile
 config/keycloak/import/*.json
 config/tls/*
+config/.public-urls
+config/.realm-settings
+config/keycloak/truststores/*
+!config/keycloak/truststores/.gitkeep
 !config/tls/.gitkeep
 
 # Fetched release assets and built bundles.

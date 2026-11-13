@@ -3,10 +3,15 @@
 # Rendered inputs: .env (install.sh), config/Caddyfile and
 # config/keycloak/import/realm-openapk.json (bin/openbin-enterprise render).
 # Everything the browser or the CLI touches goes through `proxy`; every
-# other port stays inside the compose network. The proxy also carries the
-# five public hostnames as network aliases so containers that must use the
-# public URL (none do today, but the CLI inside a jump box might) resolve
-# them without external DNS.
+# other port stays inside the compose network.
+#
+# This file is never used alone. The proxy's published ports depend on the
+# layout, so one of two overlays is added (COMPOSE_FILE, set by bin/lib.sh):
+#   compose.ip.yaml      one address, two ports (OpenBin, OpenAPK)
+#   compose.domain.yaml  five hostnames on :80/:443
+# The public URLs (APP_URL, AUTH_URL, ...) are derived from .env by
+# bin/lib.sh too, so drive the stack with `bin/openbin-enterprise`
+# (`bin/openbin-enterprise compose ...` for raw compose commands).
 
 name: openbin
 
@@ -27,23 +32,11 @@ services:
   proxy:
     <<: *restart
     image: caddy:2.9-alpine
-    ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
-      - "${HTTPS_PORT:-443}:443/udp"
     volumes:
       - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./config/tls:/etc/openbin/tls:ro
       - caddy-data:/data
       - caddy-config:/config
-    networks:
-      default:
-        aliases:
-          - ${APP_HOST}
-          - ${APK_HOST}
-          - ${API_HOST}
-          - ${AUTH_HOST}
-          - ${S3_HOST}
     depends_on:
       - frontend
       - core
@@ -77,7 +70,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       # Browsers fetch presigned URLs cross-origin from both web apps.
-      MINIO_API_CORS_ALLOW_ORIGIN: https://${APP_HOST},https://${APK_HOST}
+      MINIO_API_CORS_ALLOW_ORIGIN: ${APP_URL},${APK_URL}
       MINIO_BROWSER: "off"
     volumes:
       - minio-data:/data
@@ -113,7 +106,9 @@ services:
       KC_DB_URL_DATABASE: keycloak
       KC_DB_USERNAME: keycloak
       KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
-      KC_HOSTNAME: https://${AUTH_HOST}
+      KC_HOSTNAME: ${AUTH_URL}
+      # "/auth" in IP mode, where sign-in shares an origin with the web app.
+      KC_HTTP_RELATIVE_PATH: ${KC_PATH:-/}
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
       KC_HEALTH_ENABLED: "true"
@@ -122,6 +117,9 @@ services:
     volumes:
       - ./config/keycloak/import:/opt/keycloak/data/import:ro
       - ./config/keycloak/themes:/opt/keycloak/themes:ro
+      # CAs Keycloak should trust for outbound TLS (ldaps:// to your
+      # directory). `ldap connect --ca-cert` puts the file here.
+      - ./config/keycloak/truststores:/opt/keycloak/conf/truststores:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -136,21 +134,21 @@ services:
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
       # Tokens name the public issuer; keys are fetched over the internal
       # hop so the core never has to trust the proxy's certificate.
-      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: https://${AUTH_HOST}/realms/openapk
-      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/openapk/protocol/openid-connect/certs
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: ${AUTH_URL}/realms/openapk
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080${KC_PATH:-}/realms/openapk/protocol/openid-connect/certs
       OPENAPK_KEK_B64: ${OPENAPK_KEK_B64}
-      OPENAPK_CORS_EXTRA_ORIGINS: https://${APP_HOST},https://${APK_HOST}
+      OPENAPK_CORS_EXTRA_ORIGINS: ${APP_URL},${APK_URL}
       # Object storage: internal endpoint for the core, public one for the
       # presigned URLs browsers and the CLI use.
       OPENAPK_STORAGE_BACKEND: s3
       OPENAPK_S3_BUCKET: openbin-media
       OPENAPK_S3_REGION: us-east-1
       OPENAPK_S3_ENDPOINT: http://minio:9000
-      OPENAPK_S3_PUBLIC_ENDPOINT: https://${S3_HOST}
+      OPENAPK_S3_PUBLIC_ENDPOINT: ${S3_URL}
       OPENAPK_ANALYSIS_S3_BUCKET: openbin-analysis
       OPENAPK_ANALYSIS_S3_REGION: us-east-1
       OPENAPK_ANALYSIS_S3_ENDPOINT: http://minio:9000
-      OPENAPK_ANALYSIS_S3_PUBLIC_ENDPOINT: https://${S3_HOST}
+      OPENAPK_ANALYSIS_S3_PUBLIC_ENDPOINT: ${S3_URL}
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       AWS_REGION: us-east-1
@@ -171,16 +169,16 @@ services:
       OPENAPK_SCRIPT_ANALYZER_REGION: us-east-1
       # Where this deployment lives.
       OPENAPK_SELF_HOSTED: "true"
-      OPENAPK_OPENBIN_WEB_URL: https://${APP_HOST}
-      OPENAPK_OPENAPK_WEB_URL: https://${APK_HOST}
-      OPENAPK_PUBLIC_AUTH_URL: https://${AUTH_HOST}
-      OPENAPK_DOWNLOADS_BASE: https://${APP_HOST}/downloads
+      OPENAPK_OPENBIN_WEB_URL: ${APP_URL}
+      OPENAPK_OPENAPK_WEB_URL: ${APK_URL}
+      OPENAPK_PUBLIC_AUTH_URL: ${AUTH_URL}
+      OPENAPK_DOWNLOADS_BASE: ${APP_URL}/downloads
       OPENAPK_TOS_REQUIRED: ${TOS_REQUIRED:-false}
       OPENAPK_LLM_EGRESS_ALLOWLIST: ${LLM_EGRESS_ALLOWLIST:-}
       OPENAPK_ADMIN_EMAILS: ${ADMIN_EMAIL}
       # Account deletion removes the Keycloak identity too.
       OPENAPK_KEYCLOAK_ADMIN_ENABLED: "true"
-      OPENAPK_KEYCLOAK_URL: http://keycloak:8080
+      OPENAPK_KEYCLOAK_URL: http://keycloak:8080${KC_PATH:-}
       OPENAPK_KEYCLOAK_REALM: openapk
       OPENAPK_KEYCLOAK_ADMIN_CLIENT_ID: openbin-core
       OPENAPK_KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_CORE_CLIENT_SECRET}
@@ -237,10 +235,11 @@ services:
     <<: *restart
     image: ${IMAGE_PREFIX}/frontend:${OPENBIN_VERSION}
     environment:
-      APP_HOST: ${APP_HOST}
-      APK_HOST: ${APK_HOST}
-      API_HOST: ${API_HOST}
-      AUTH_HOST: ${AUTH_HOST}
+      APP_URL: ${APP_URL}
+      API_URL: ${API_URL}
+      AUTH_URL: ${AUTH_URL}
+      APK_API_URL: ${APK_API_URL}
+      APK_AUTH_URL: ${APK_AUTH_URL}
     volumes:
       - ./downloads:/usr/share/openbin/downloads:ro
 

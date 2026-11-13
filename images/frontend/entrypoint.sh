@@ -1,24 +1,31 @@
 #!/bin/sh
 # Runs before nginx starts (official image hook). Two jobs:
-#   1. write /run/openbin/openbin-config.js from the compose env;
+#   1. write one runtime config per web app from the compose env. The two
+#      apps can be given different endpoints: in the IP layout each one
+#      reaches the backend and sign-in discovery through its own origin;
 #   2. expose the mounted downloads/ directory, rewriting the install
 #      scripts so `curl ... | sh` fetches from this instance, not GitHub.
 set -eu
 
-: "${APP_HOST:?APP_HOST is required}"
-: "${APK_HOST:?APK_HOST is required}"
-: "${API_HOST:?API_HOST is required}"
-: "${AUTH_HOST:?AUTH_HOST is required}"
+: "${APP_URL:?APP_URL is required (public URL of the OpenBin web app)}"
+: "${API_URL:?API_URL is required (public URL of the backend)}"
+: "${AUTH_URL:?AUTH_URL is required (public URL of Keycloak)}"
+APK_API_URL="${APK_API_URL:-$API_URL}"
+APK_AUTH_URL="${APK_AUTH_URL:-$AUTH_URL}"
 
-DOWNLOADS_URL="https://${APP_HOST}/downloads"
-cat > /run/openbin/openbin-config.js <<JS
+DOWNLOADS_URL="${APP_URL}/downloads"
+write_config() { # file api auth
+  cat > "$1" <<JS
 window.__OPENBIN_CONFIG__ = {
-  apiBase: "https://${API_HOST}",
-  authority: "https://${AUTH_HOST}/realms/openapk",
+  apiBase: "$2",
+  authority: "$3/realms/openapk",
   installBase: "${DOWNLOADS_URL}",
   selfHosted: true
 };
 JS
+}
+write_config /run/openbin/openbin-config.js "$API_URL" "$AUTH_URL"
+write_config /run/openbin/openapk-config.js "$APK_API_URL" "$APK_AUTH_URL"
 
 SRC=/usr/share/openbin/downloads
 DST=/run/openbin/downloads
@@ -45,4 +52,4 @@ if [ -d "$SRC" ]; then
     fi
   done
 fi
-echo "openbin frontend: api=https://${API_HOST} auth=https://${AUTH_HOST} downloads=${DOWNLOADS_URL}"
+echo "openbin frontend: api=${API_URL} auth=${AUTH_URL} downloads=${DOWNLOADS_URL}"

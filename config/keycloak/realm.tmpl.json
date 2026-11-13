@@ -18,8 +18,8 @@
   "loginTheme": "openbin",
   "clients": [
     {
-      "clientId": "openapk-frontend",
-      "name": "OpenBin / OpenAPK web apps",
+      "clientId": "openbin-frontend",
+      "name": "OpenBin web app",
       "enabled": true,
       "publicClient": true,
       "standardFlowEnabled": true,
@@ -28,10 +28,27 @@
       "protocol": "openid-connect",
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "__APP_ORIGIN__/*##__APK_ORIGIN__/*"
+        "post.logout.redirect.uris": "__APP_ORIGIN__/*"
       },
-      "redirectUris": ["__APP_ORIGIN__/*", "__APK_ORIGIN__/*"],
-      "webOrigins": ["__APP_ORIGIN__", "__APK_ORIGIN__"],
+      "redirectUris": ["__APP_ORIGIN__/*"],
+      "webOrigins": ["__APP_ORIGIN__"],
+      "defaultClientScopes": ["web-origins", "acr", "profile", "roles", "email"]
+    },
+    {
+      "clientId": "openapk-frontend",
+      "name": "OpenAPK web app",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "__APK_ORIGIN__/*"
+      },
+      "redirectUris": ["__APK_ORIGIN__/*"],
+      "webOrigins": ["__APK_ORIGIN__"],
       "defaultClientScopes": ["web-origins", "acr", "profile", "roles", "email"]
     },
     {
@@ -55,7 +72,7 @@
     {
       "clientId": "openbin-core",
       "name": "OpenBin backend (service account)",
-      "description": "Used by the backend to delete a user's Keycloak identity when they delete their account.",
+      "description": "Used by the backend to delete a user's Keycloak identity when they delete their account, and by the installer to update the web client's URLs when the address or ports change.",
       "enabled": true,
       "publicClient": false,
       "secret": "__CORE_CLIENT_SECRET__",
@@ -70,7 +87,7 @@
       "username": "service-account-openbin-core",
       "enabled": true,
       "serviceAccountClientId": "openbin-core",
-      "clientRoles": { "realm-management": ["manage-users", "view-users"] }
-    }
+      "clientRoles": { "realm-management": ["manage-users", "view-users", "manage-clients", "view-clients"] }
+    }__ADMIN_USER__
   ]
 }
