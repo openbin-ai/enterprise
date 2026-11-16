@@ -12,6 +12,7 @@
 #   openbin-enterprise ldap connect|sync|status|remove   sign in with LDAP / Active Directory (ldap connect --help)
 #   openbin-enterprise ca-cert           print this install's root CA (import it on analyst machines)
 #   openbin-enterprise urls              print the addresses users open
+#   openbin-enterprise doctor [--from IP [--trace]]  why other machines cannot connect (run with sudo)
 #   openbin-enterprise compose ARGS...   raw `docker compose` against this stack
 #   openbin-enterprise config            print the non-secret configuration
 #   openbin-enterprise psql              open a psql shell on the platform database
@@ -22,7 +23,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cmd="${1:-help}"; shift || true
 case "$cmd" in
-  help|-h|--help) sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  help|-h|--help) sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 require_docker
 load_env
@@ -31,6 +32,7 @@ case "$cmd" in
   up)       render_all; start_stack 600 ;;
   compose)  compose "$@" ;;
   urls)     print_summary ;;
+  doctor)   doctor "$@" ;;
   down)     compose down ;;
   restart)  compose restart "$@" ;;
   status)

@@ -155,3 +155,31 @@ install directory does not see them.
 bin/openbin-enterprise down
 docker volume rm openbin_postgres-data openbin_minio-data openbin_caddy-data openbin_caddy-config openbin_core-workspace
 ```
+
+## Other machines time out
+
+If the install works on the host itself but other machines cannot connect,
+run this on the host:
+
+```sh
+sudo bin/openbin-enterprise doctor --from <address of a machine that times out>
+```
+
+It changes nothing. It checks the three things that break published Docker
+ports on locked-down hosts (packet forwarding switched off, a host firewall
+that drops forwarded traffic, a Docker network whose address range overlaps
+your own network), then listens for 20 seconds while you retry from that
+machine and says whether the request never arrived, arrived and was dropped
+by this host, or was answered.
+
+Add `--trace` to follow those packets through the host firewall and name
+the exact rule or chain policy that drops them:
+
+```sh
+sudo bin/openbin-enterprise doctor --from <address> --trace
+```
+
+`--trace` is the one option that touches the host: it adds a temporary
+nftables table (`openbin_doctor`) that only marks the matching packets for
+tracing, and removes it when the 20 seconds are up. It needs the `nft`
+command; hosts that filter with legacy iptables are not traced.
