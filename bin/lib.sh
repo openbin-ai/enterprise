@@ -778,3 +778,185 @@ First steps:
        openbin login --server ${API_URL}
 SUMMARY
 }
+
+# ---- doctor: why can't other machines reach this install? ---------------------
+# Read-only. The proxy's ports are published through Docker, so a packet from
+# another machine is DNAT'd to the container and FORWARDED by the kernel; a
+# listening socket (ss, nc) and a working local curl prove neither. The checks
+# below cover what breaks that path on locked-down hosts.
+_ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24)|(b<<16)|(c<<8)|d )); }
+_in_cidr() { # ip cidr
+  local len="${2#*/}" mask
+  mask=$(( len == 0 ? 0 : (0xFFFFFFFF << (32-len)) & 0xFFFFFFFF ))
+  [ $(( $(_ip2int "$1") & mask )) -eq $(( $(_ip2int "${2%/*}") & mask )) ]
+}
+_cidr_overlap() { _in_cidr "${1%/*}" "$2" || _in_cidr "${2%/*}" "$1"; }
+_docker_subnets() { # lines: "<network> <ipv4 cidr>"
+  local ids; ids="$(docker network ls -q)"; [ -n "$ids" ] || return 0
+  # shellcheck disable=SC2086
+  docker network inspect $ids --format '{{$n := .Name}}{{range .IPAM.Config}}{{$n}} {{.Subnet}}{{"\n"}}{{end}}' \
+    | awk 'NF==2 && $2 !~ /:/'
+}
+
+# Packets the reverse-path filter has dropped since boot (0 if unreadable).
+_rpf_drops() {
+  awk '/^TcpExt:/ { if (!h) { for (i=1;i<=NF;i++) if ($i=="IPReversePathFilter") c=i; h=1 } else if (c) print $c }' /proc/net/netstat 2>/dev/null | grep . || echo 0
+}
+
+doctor() { # [--from CLIENT_IP [--trace]]
+  local from="" trace=0 bad=0 ports p ip lan name net v
+  while [ $# -gt 0 ]; do case "$1" in
+    --from) from="${2:-}"; shift 2 ;;
+    --trace) trace=1; shift ;;
+    *) die "usage: openbin-enterprise doctor [--from CLIENT_IP [--trace]]" ;; esac; done
+  [ "$trace" -eq 0 ] || [ -n "$from" ] || die "--trace needs --from CLIENT_IP"
+  [ -z "$from" ] || is_ipv4 "$from" || die "--from takes the IPv4 address of a machine that cannot connect"
+  _bad()  { printf '  %sFAIL%s %s\n' "$C_ERR" "$C_0" "$*"; bad=$((bad+1)); }
+  _good() { printf '  %sok%s   %s\n' "$C_OK" "$C_0" "$*"; }
+  _note() { printf '  %snote%s %s\n' "$C_WARN" "$C_0" "$*"; }
+  [ "$(id -u)" -eq 0 ] || warn "not running as root: firewall rules cannot be read; re-run with sudo"
+
+  if [ "$INSTALL_MODE" = ip ]; then ports="$OPENBIN_PORT $OPENAPK_PORT"; ip="$HOST_IP"
+  else ports="${HTTP_PORT:-80} ${HTTPS_PORT:-443}"; ip="$(detect_ip)"; fi
+
+  info "proxy and published ports (address $ip)"
+  if [ -z "$(compose ps -q --status running proxy 2>/dev/null)" ]; then _bad "the proxy container is not running (bin/openbin-enterprise status)"
+  else
+    for p in $ports; do
+      v="$(compose port proxy "$p" 2>/dev/null || true)"
+      case "$v" in
+        0.0.0.0:*|"[::]:"*|"$ip":*) _good "port $p published on $v" ;;
+        "") _bad "port $p is not published by the proxy" ;;
+        *)  _bad "port $p is published on $v, which other machines cannot reach" ;;
+      esac
+      if (exec 3<>"/dev/tcp/$ip/$p") 2>/dev/null; then _good "port $p answers from this host"
+      else _bad "port $p does not answer even from this host: the proxy is the problem, not the network (bin/openbin-enterprise logs proxy)"; fi
+    done
+  fi
+
+  info "packet forwarding (remote clients reach the container through the kernel's FORWARD path)"
+  v="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo '?')"
+  if [ "$v" = 1 ]; then _good "net.ipv4.ip_forward = 1"
+  else _bad "net.ipv4.ip_forward = $v. Hardened images turn this off; with it off, local connections work and remote ones time out.
+       fix: sysctl -w net.ipv4.ip_forward=1, and persist it in /etc/sysctl.d/ (check that a hardening profile does not reset it)"; fi
+  if grep -qsE '"iptables"[[:space:]]*:[[:space:]]*false' /etc/docker/daemon.json; then
+    _bad "/etc/docker/daemon.json has \"iptables\": false, so Docker publishes no ports to other machines"; fi
+
+  info "address clashes between Docker's networks and your network"
+  lan="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$ip" '{split($4,a,"/"); if (a[1]==ip) {print $4; exit}}')"
+  while read -r name net; do
+    [ -n "$name" ] || continue
+    if [ -n "$lan" ] && _cidr_overlap "$lan" "$net"; then
+      _bad "Docker network '$name' ($net) overlaps this host's network ($lan): replies to clients are routed into Docker and lost"
+    elif [ -n "$from" ] && _in_cidr "$from" "$net"; then
+      _bad "client $from is inside Docker network '$name' ($net): replies to it are routed into Docker and lost"
+    else _good "$name $net"; fi
+  done < <(_docker_subnets)
+  if [ -n "$from" ]; then
+    v="$(ip -4 route get "$from" 2>/dev/null | head -1)"
+    case "$v" in
+      *" dev br-"*|*" dev docker"*) _bad "replies to $from leave through a Docker bridge: $v" ;;
+      "") _bad "this host has no route back to $from" ;;
+      *)  _good "route back to $from: $v" ;;
+    esac
+  fi
+
+  info "host firewall"
+  if [ "$(id -u)" -ne 0 ]; then _note "skipped (needs root)"
+  else
+    if command -v firewall-cmd >/dev/null 2>&1 && [ "$(firewall-cmd --state 2>/dev/null)" = running ]; then
+      _note "firewalld is running. Zones: $(firewall-cmd --get-active-zones 2>/dev/null | tr '\n' ' ')"
+      for p in $ports; do
+        firewall-cmd --quiet --query-port="$p/tcp" 2>/dev/null && _good "firewalld allows $p/tcp" \
+          || _note "firewalld does not list $p/tcp (fix: firewall-cmd --permanent --add-port=$p/tcp && firewall-cmd --reload)"
+      done
+    fi
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+      _note "ufw is active; published Docker ports bypass ufw's INPUT rules but obey its forward policy ($(grep -s '^DEFAULT_FORWARD_POLICY' /etc/default/ufw))"; fi
+    if command -v nft >/dev/null 2>&1; then
+      v="$(nft list ruleset 2>/dev/null | awk '/^table /{t=$2" "$3} /hook (forward|prerouting|input)/ && /policy drop/ {print t": "$0}' | sed 's/[[:space:]]\+/ /g')"
+      if [ -n "$v" ]; then
+        _note "nftables chains that drop by default. A drop in any table wins even though Docker's own rules accept, so each of these must allow tcp ports $ports and forwarding to the Docker bridges:"
+        printf '%s\n' "$v" | sed 's/^/         /'
+      else _good "no nftables chain drops by default on input/forward"; fi
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+      v="$(iptables -S DOCKER-USER 2>/dev/null | grep -vE '^-N|-j RETURN$' || true)"
+      [ -z "$v" ] || { _note "rules in DOCKER-USER (evaluated before Docker's own):"; printf '%s\n' "$v" | sed 's/^/         /'; }
+      iptables -S FORWARD 2>/dev/null | grep -q -- '-j DOCKER' || _bad "Docker's rules are missing from the FORWARD chain (a firewall reload flushes them): systemctl restart docker, then bin/openbin-enterprise up"
+    fi
+  fi
+
+  if [ -n "$from" ]; then
+    p="${ports%% *}"
+    info "live capture: connect from $from to https://$ip:$p/ now (listening 20s)"
+    if [ "$(id -u)" -ne 0 ] || ! command -v tcpdump >/dev/null 2>&1; then _note "skipped (needs root and tcpdump)"
+    else
+      local rpf0 tf="" tpid="" syn
+      rpf0="$(_rpf_drops)"
+      if [ "$trace" -eq 1 ]; then
+        if ! command -v nft >/dev/null 2>&1; then _note "--trace needs the nft command; continuing without it"
+        elif nft -f - <<NFT
+table inet openbin_doctor {
+  chain pre { type filter hook prerouting priority -350; policy accept;
+    ip saddr $from tcp dport $p meta nftrace set 1
+    ip daddr $from tcp sport $p meta nftrace set 1
+  }
+  chain out { type filter hook output priority -350; policy accept;
+    ip daddr $from tcp sport $p meta nftrace set 1
+  }
+}
+NFT
+        then
+          tf="$(mktemp)"
+          trap 'nft delete table inet openbin_doctor 2>/dev/null; rm -f "$tf"' EXIT INT TERM
+          timeout 20 nft monitor trace >"$tf" 2>/dev/null &
+          tpid=$!
+        else _note "could not install the temporary trace rule; continuing without it"; fi
+      fi
+      v="$(timeout 20 tcpdump -nli any "tcp port $p and host $from" 2>/dev/null || true)"
+      if [ -n "$tf" ]; then wait "$tpid" 2>/dev/null || true; nft delete table inet openbin_doctor 2>/dev/null || true; fi
+      printf '%s\n' "$v" | head -12 | sed 's/^/         /'
+      syn="$(printf '%s\n' "$v" | grep 'Flags \[S\]' || true)"
+      if [ -z "$syn" ]; then
+        _bad "nothing from $from arrived. The packets are stopped before this host: a network firewall, switch ACL or client-side rule. Nothing on this host can fix that."
+      else
+        # tcpdump -i any names the interface on each line: the request should
+        # show on the network card (In), then the Docker bridge and a veth (Out).
+        name="$(printf '%s\n' "$syn" | awk '$3=="In"||$3=="Out"{print $2" "$3}' | awk '!s[$0]++' | paste -sd, - | sed 's/,/, /g')"
+        [ -z "$name" ] || _note "the connection request was seen on: $name"
+        if ! printf '%s' "$v" | grep -q 'Flags \[S\.\]'; then
+          case "$name" in
+            *br-*|*docker*|*veth*) _bad "the request was forwarded to Docker but no answer came back: look at the proxy (bin/openbin-enterprise logs proxy)" ;;
+            *) _bad "the request arrived on the network card and went no further: this host dropped it before it reached Docker" ;;
+          esac
+        else
+          _note "this host answered. If $from still times out, the reply is lost on the way back (return-path filtering, or an address clash above)."
+        fi
+      fi
+      v=$(( $(_rpf_drops) - rpf0 ))
+      [ "$v" -le 0 ] || _bad "the kernel's reverse-path filter dropped $v packet(s) during the capture: it does not accept $from on the interface the packets arrive on
+       (check: sysctl net.ipv4.conf.all.rp_filter, and the route back to $from above)"
+      if [ -n "$tf" ]; then
+        # One line per rule or chain policy that ended a traced packet.
+        v="$(sed 's/^trace id [0-9a-f]* //' "$tf" | grep -E 'verdict (drop|reject)|policy drop' | awk '!s[$0]++' || true)"
+        if [ -n "$v" ]; then
+          _bad "firewall trace: these rules dropped the packets (format: family table chain, then the rule or policy)"
+          printf '%s\n' "$v" | sed 's/^/         /'
+        elif [ -s "$tf" ]; then
+          v="$(sed 's/^trace id [0-9a-f]* //' "$tf" | awk '$2!="openbin_doctor"{print $2"/"$3}' | awk '!s[$0]++' | paste -sd' ' -)"
+          _good "firewall trace: no nftables rule dropped the packets (chains they passed: ${v:-none})"
+        else
+          _note "firewall trace: recorded nothing (no packets, or this host filters with legacy iptables, which nft cannot trace)"
+        fi
+        rm -f "$tf"; trap - EXIT INT TERM
+      fi
+      v="$(journalctl -k --since '-40s' --no-pager 2>/dev/null | grep -E "DPT=$p |SPT=$p " | tail -5 || true)"
+      [ -z "$v" ] || { _note "kernel log lines for port $p (a firewall logging what it blocks):"; printf '%s\n' "$v" | sed 's/^/         /'; }
+    fi
+  fi
+
+  echo
+  if [ "$bad" -eq 0 ]; then ok "no problem found on this host${from:+ for $from}"; [ -n "$from" ] || echo "    Re-run with --from <address of a machine that times out> to trace a real attempt."
+  else printf '%s==>%s %s problem(s) found, marked FAIL above\n' "$C_ERR" "$C_0" "$bad"; return 1; fi
+}

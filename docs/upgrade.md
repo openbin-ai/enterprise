@@ -7,13 +7,13 @@ the object store changes shape.
 Online:
 
 ```sh
-bin/openbin-enterprise upgrade --version 2026.11.0
+bin/openbin-enterprise upgrade --version 2026.11.1
 ```
 
 Offline:
 
 ```sh
-bin/openbin-enterprise upgrade --images openbin-enterprise-images-2026.11.0.tar.gz
+bin/openbin-enterprise upgrade --images openbin-enterprise-images-2026.11.1.tar.gz
 ```
 
 Either form takes a backup first (`backups/<timestamp>/`), updates

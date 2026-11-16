@@ -77,9 +77,9 @@ bin/openbin-enterprise status | logs [service] | backup | restore DIR | upgrade 
 ## Build a release (maintainers)
 
 ```sh
-scripts/build-images.sh --platform-dir ../OpenAPK          # images from the platform checkout
+scripts/build-images.sh --platform-dir ../platform-enterprise          # images from the platform checkout
 scripts/push-images.sh                                     # to ghcr.io/openbin-ai/enterprise
-scripts/fetch-downloads.sh --platform-dir ../OpenAPK       # CLI, worker tarballs, BINNY, install scripts
+scripts/fetch-downloads.sh --platform-dir ../platform-enterprise       # CLI, worker tarballs, BINNY, install scripts
 scripts/save-images.sh                                     # one tar.gz with every image
 scripts/package.sh            # online bundle
 scripts/package.sh --offline  # bundle with images + downloads
